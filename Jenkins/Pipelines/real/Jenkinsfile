@@ -1,0 +1,25 @@
+pipeline{
+    agent any
+
+    tools{
+
+    }
+    
+    stages{
+        stage("Build-App"){
+            steps{
+             echo 'building app with npm'
+             dir('.'){
+                sh 'npm i'
+                sh 'npm start'
+             }
+            }
+        }
+    }
+
+    post{
+        always {
+        echo 'done!' 
+        }
+    }
+}

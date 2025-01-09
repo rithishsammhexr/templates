@@ -1,0 +1,71 @@
+pipeline {
+    agent any
+
+    environment {
+        GIT_REPO_URL = 'git@github.com:<username>/<repository>.git' // Update with your Git repo
+        GIT_BRANCH = 'main' // Change branch as needed
+        DOCKER_COMPOSE_FILE = 'docker-compose.yml'
+        APP_NAME = 'my-app' // Your Docker Compose service name
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Pulling code from Git repository"
+                // Clone the repository
+                git branch: "${GIT_BRANCH}",
+                    url: "${GIT_REPO_URL}",
+                    credentialsId: 'github-credentials' // Replace with Jenkins credentials ID
+            }
+        }
+
+        stage('Build') {
+            steps {
+                echo "Building Docker images"
+                script {
+                    // Build Docker images defined in the Docker Compose file
+                    sh 'docker-compose build'
+                }
+            }
+        }
+
+        stage('Stop Old Application') {
+            steps {
+                echo "Stopping and removing the old application"
+                script {
+                    // Stop and remove old containers
+                    sh 'docker-compose down'
+                }
+            }
+        }
+
+        stage('Deploy New Application') {
+            steps {
+                echo "Deploying the new application"
+                script {
+                    // Bring up the new containers
+                    sh 'docker-compose up -d'
+                }
+            }
+        }
+
+        stage('Post-Deployment Health Check') {
+            steps {
+                echo "Checking application health"
+                script {
+                    // Optional: Add a health check to verify that the app is running
+                    sh "docker-compose ps"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Deployment successful!'
+        }
+        failure {
+            echo 'Deployment failed!'
+        }
+    }
+}
