@@ -41,7 +41,7 @@ pipeline {
     stages {
         stage('Source') {
             steps {
-                cleanWs()
+               cleanWs(deleteDirs: true, disableDeferredWipeout: true)
                 script {
                     powershell '''
                         Write-Host "Starting source stage..."
@@ -161,7 +161,7 @@ pipeline {
             '''
         }
         always {
-            cleanWs()
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
         }
     }
 }
