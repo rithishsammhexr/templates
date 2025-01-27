@@ -35,7 +35,7 @@ pipeline {
         APP_NAME = 'Sabarinathan/marketplace_Dwnizo_backend'
         // Add container names for verification
         MAIN_CONTAINER = 'marketplace_end'
-        DB_CONTAINER = 'mongo-container'
+        DB_CONTAINER = 'marketplace-mongo-container'
     }
 
     stages {
