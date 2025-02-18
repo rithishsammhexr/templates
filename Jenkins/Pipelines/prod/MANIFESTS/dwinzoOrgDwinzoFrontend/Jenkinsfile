@@ -1,29 +1,19 @@
-// Pipeline script for Windows environment using PowerShell
-// Handles Node.js app deployment with Docker Compose using POLLSCM
 pipeline {
     agent {
         label 'remote-server-agent'
     }
 
     triggers {
-        // Generic Webhook Trigger
         GenericTrigger(
             genericVariables: [
                 [key: 'ref', value: '$.ref'],
                 [key: 'commit', value: '$.after'],
                 [key: 'author', value: '$.commits[0].author.name']
             ],
-            
-            // Optional filter
             causeString: 'Triggered by commit on $ref by $author',
-            
-            // Define which branches to trigger builds for
-            token: 'dwinzoOrgDwinzoFrontend',  // Secret token to validate webhook
-            
+            token: 'dwinzoOrgDwinzoFrontend',
             printContributedVariables: true,
             printPostContent: true,
-            
-            // Optional branch filtering
             regexpFilterText: '$ref',
             regexpFilterExpression: '^refs/heads/main$'
         )
@@ -33,14 +23,13 @@ pipeline {
         GIT_CREDENTIALS = credentials('rithishsamm')
         DOCKER_COMPOSE = 'docker-compose'
         APP_NAME = 'Dwinzo/Dwinzo-Frontend'
-        // Add container names for verification
         MAIN_CONTAINER = 'dwinzo-frontend'
     }
 
     stages {
         stage('Source') {
             steps {
-               cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
                 script {
                     powershell '''
                         Write-Host "Starting source stage..."
@@ -67,12 +56,18 @@ pipeline {
             steps {
                 script {
                     powershell '''
-                         Write-Host "Cleaning existing Docker resources..."
-                         # Stop and remove main container if exists
-                         if (docker ps -a -q -f name="$env:MAIN_CONTAINER") {
-                             docker stop $env:MAIN_CONTAINER
-                             docker rm $env:MAIN_CONTAINER
-                         }
+                        Write-Host "Cleaning existing Docker resources..."
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        
+                        Write-Host "Currently existing containers:"
+                        docker ps -a
                         dir
                     '''
                     
@@ -94,37 +89,21 @@ pipeline {
                         $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
                         docker compose up -d
                         
-                        # Wait for containers to start (give them a few seconds)
                         Start-Sleep -Seconds 10
                         
-                        # Verify both containers are running
                         $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
-                        $dbContainer = docker ps -q -f name="$env:DB_CONTAINER"
-                        
-                        if ($mainContainer -and $dbContainer) {
-                            Write-Host "Application deployed successfully!"
-                            Write-Host "Main Container ID: $mainContainer"
-                            Write-Host "Database Container ID: $dbContainer"
-                            
-                            Write-Host "Main Container Logs:"
-                            docker logs $mainContainer
-                            
-                            Write-Host "Database Container Status:"
-                            docker container inspect $dbContainer --format '{{.State.Status}}'
-                        } else {
-                            if (-not $mainContainer) {
-                                Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
-                            }
-                            if (-not $dbContainer) {
-                                Write-Error "Database container ($env:DB_CONTAINER) not found"
-                            }
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
                             exit 1
                         }
                         
-                        # Show running containers for verification
+                        Write-Host "Application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        Write-Host "Main Container Logs:"
+                        docker logs $mainContainer
+                        
                         Write-Host "Currently running containers:"
                         docker ps
-                        
                         dir
                     '''
                 }
@@ -149,7 +128,6 @@ pipeline {
                 Write-Host "Triggered by commit: $env:commit"
                 Write-Host "Author: $env:author"
                 
-                # Display container status on failure
                 Write-Host "Container status:"
                 docker ps -a
             '''
