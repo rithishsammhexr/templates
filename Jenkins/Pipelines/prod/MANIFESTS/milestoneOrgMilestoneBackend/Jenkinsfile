@@ -1,0 +1,167 @@
+// Pipeline script for Windows environment using PowerShell
+// Handles Node.js app deployment with Docker Compose using POLLSCM
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        // Generic Webhook Trigger
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            
+            // Optional filter
+            causeString: 'Triggered by commit on $ref by $author',
+            
+            // Define which branches to trigger builds for
+            token: 'milestoneOrgMilestoneBackend',  // Secret token to validate webhook
+            
+            printContributedVariables: true,
+            printPostContent: true,
+            
+            // Optional branch filtering
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('rithishsamm')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'Milestone-Backend'
+        // Add container names for verification
+        MAIN_CONTAINER = 'milestone-backend'
+        DB_CONTAINER = 'mongo-backend-container'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+               cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+                    
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Milestone/Milestone-Backend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        # Stop and remove main container if exists
+                        if (docker ps -a -q -f name="$env:MAIN_CONTAINER") {
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        }
+                        # Stop and remove database container if exists
+                        if (docker ps -a -q -f name="$env:DB_CONTAINER") {
+                            docker stop $env:DB_CONTAINER
+                            docker rm $env:DB_CONTAINER
+                        }
+                        dir
+                    '''
+                    
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        
+                        # Wait for containers to start (give them a few seconds)
+                        Start-Sleep -Seconds 10
+                        
+                        # Verify both containers are running
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        $dbContainer = docker ps -q -f name="$env:DB_CONTAINER"
+                        
+                        if ($mainContainer -and $dbContainer) {
+                            Write-Host "Application deployed successfully!"
+                            Write-Host "Main Container ID: $mainContainer"
+                            Write-Host "Database Container ID: $dbContainer"
+                            
+                            Write-Host "Main Container Logs:"
+                            docker logs $mainContainer
+                            
+                            Write-Host "Database Container Status:"
+                            docker container inspect $dbContainer --format '{{.State.Status}}'
+                        } else {
+                            if (-not $mainContainer) {
+                                Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            }
+                            if (-not $dbContainer) {
+                                Write-Error "Database container ($env:DB_CONTAINER) not found"
+                            }
+                            exit 1
+                        }
+                        
+                        # Show running containers for verification
+                        Write-Host "Currently running containers:"
+                        docker ps
+                        
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                
+                # Display container status on failure
+                Write-Host "Container status:"
+                docker ps -a
+            '''
+        }
+        always {
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+    }
+}
