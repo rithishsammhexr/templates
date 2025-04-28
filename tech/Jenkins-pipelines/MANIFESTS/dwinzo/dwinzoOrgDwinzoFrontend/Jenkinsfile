@@ -1,0 +1,139 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoOrgDwinzoFrontend',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('rithishsamm')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'Dwinzo/Dwinzo-Frontend'
+        MAIN_CONTAINER = 'dwinzo-frontend'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+                    
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo/Dwinzo-Frontend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        
+                        Write-Host "Currently existing containers:"
+                        docker ps -a
+                        dir
+                    '''
+                    
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        
+                        Start-Sleep -Seconds 10
+                        
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            exit 1
+                        }
+                        
+                        Write-Host "Application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        Write-Host "Main Container Logs:"
+                        docker logs $mainContainer
+                        
+                        Write-Host "Currently running containers:"
+                        docker ps
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                
+                Write-Host "Container status:"
+                docker ps -a
+            '''
+        }
+        always {
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+    }
+}

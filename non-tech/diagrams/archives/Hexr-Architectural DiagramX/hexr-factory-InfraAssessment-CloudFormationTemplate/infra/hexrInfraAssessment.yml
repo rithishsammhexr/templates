@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2024-03-18'
+Description: Hexr AWS Deployment in Asia and US 
+
+Parameters:
+  AsiaRegion:
+    Type: String
+    Default: ap-southeast-1
+    Description: The AWS region in Asia
+
+  AsiaAZ1:
+    Type: String
+    Default: ap-southeast-1a
+    Description: Availability Zone in Asia
+
+  USRegion:
+    Type: String
+    Default: US-west-1
+    Description: The AWS region in US
+
+  USAZ1:
+    Type: String
+    Default: US-west-1a
+    Description: Availability Zone in US
+
+# Asia VPC, Public and Private Subnets
+
+Resources:
+  VPCAsia:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: MultiRegionVPCAsia
+
+
+  VPCSubnet1Asia:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCAsia 
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: AsiaAZ1
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet1Asia
+  
+  PrivateSubnet1Asia:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCAsia
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: AsiaAZ1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet1Asia
+
+  VPCSubnet2Asia:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCAsia 
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: AsiaAZ2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet1Asia
+  
+  PrivateSubnet2Asia:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCAsia
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: AsiaAZ2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet2Asia
+  
+          
+# US VPC, Public and Private Subnets
+  VPCUS:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: MultiRegionVPCUS
+
+
+VPCSubnet1US:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCAsia 
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: USAZ1
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet1US
+  
+PrivateSubnet1US:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:  VPCUS
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: USAZ1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet1US
+
+VPCSubnet2US:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCUS 
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: USAZ2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet2US
+  
+PrivateSubnet2US:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: VPCUS
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: USAZ2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet2US
+
+#IGW Config Asia & US
+InternetGatewayAsia:
+    Type: AWS::EC2::InternetGateway
+
+AttachGatewayAsia:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: VPCAsia 
+      InternetGatewayId: InternetGatewayAsia 
+
+InternetGatewayUS:
+    Type: AWS::EC2::InternetGateway
+
+AttachGatewayUS:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: VPCUS 
+      InternetGatewayId: InternetGatewayUS 
+#AWS WAF Config 
+#Asia
+WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      # WAF rules and conditions here, destination, resources traffic distribution and configuration (!notProficient, This WAF Config based out of a template for AWS Docs)
+      Scope: REGIONAL
+      Description: WebACL for protecting ALB
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: WebACL
+        SampledRequestsEnabled: true
+      Rules:
+        - Action:
+            Allow: {}
+          Priority: 1
+          RuleAction: ALLOW
+          Statement:
+            ManagedRuleGroupStatement:
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: WebACLRules
+            SampledRequestsEnabled: true
+
+WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: [ALBAsia, LoadBalancerArn] 
+      WebACLArn: WAFWebACL  
+
+#Asia
+ALBAsia:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - Ref: VPCSubnetAsia
+      SecurityGroups:
+        - [ALBSecurityGroupAsia, GroupId] 
+
+ALBSecurityGroupAsia:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: VPCAsia 
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow HTTP access
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+
+#US
+ALBUS:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - Ref: VPCSubnetUS
+      SecurityGroups:
+        - [ALBSecurityGroupUS, GroupId] 
+
+ALBSecurityGroupUS:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: VPCUS
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow HTTP access
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+
+
+#  Auto Scaling groups for servers, Asia & US
+ASGAsia:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones:
+        - AsiaAZ1
+        - AsiaAZ2
+      LaunchTemplate:
+        LaunchTemplateName: LaunchTemplate
+        DesiredCapacity: 2
+        MaxSize: 4
+        MinSize: 2
+
+ASGUS:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones:
+        - USAZ1
+        - USAZ2
+      LaunchTemplate:
+        LaunchTemplateName: LaunchTemplate
+        DesiredCapacity: 2
+        MaxSize: 4
+        MinSize: 2
+
+#NAT GATEWAY Config Asia and US
+NATGateway1Asia:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: [EIPAsia, AllocationId]
+      SubnetId: VPCSubnet1Asia
+
+NATGateway2Asia:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: [EIPAsia, AllocationId]
+      SubnetId: VPCSubnet2Asia
+
+NATGateway1US:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: [EIPAsia, AllocationId]
+      SubnetId: VPCSubnet1US
+
+NATGateway2US:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: [EIPAsia, AllocationId]
+      SubnetId: VPCSubnet2US
+
+
+EIPAsia:
+    Type: AWS::EC2::EIP
+EIPUS:
+    Type: AWS::EC2::EIP
+
+# Define EKS cluster in the private subnets
+EKSClusterAsia:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: EKSClusterAsia
+      ResourcesVpcConfig:
+        SubnetIds:
+          - PrivateSubnet1Asia
+          - PrivateSubnet2Asia
+
+EKSClusterUS:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: EKSClusterUS
+      ResourcesVpcConfig:
+        SubnetIds:
+          - PrivateSubnet1US
+          - PrivateSubnet2US
+
+# Create an Amazon RDS database instance (e.g., MySQL) in the private subnets
+RDSDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      DBInstanceIdentifier: MyDB
+      DBInstanceClass: db.t2.micro
+      Engine: mysql
+      MasterUsername: admin
+      MasterUserPassword: adminpassword
+      VPCSecurityGroups:
+        - RDSSecurityGroup
+      AvailabilityZone: 
+      - AsiaAZ1
+      - AsiaAZ2
+      - USAZ1
+      - USAZ2
+      MultiAZ: false
+      PubliclyAccessible: false
+
+RDSSecurityGroup:
+Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Security Group
+      VpcId:
+        Fn::If:
+          - IsAsia
+          - VPCAsia
+          - IsUS
+          - VPCUS
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/16
+          FromPort: 3306
+          ToPort: 3306
+          IpProtocol: tcp
+        - CidrIp: 10.0.0.0/16
+          FromPort: 3306
+          ToPort: 3306
+          IpProtocol: tcp
+
+
+Outputs:
+#Example Output of ALB Asia and US if you have an ALB with the DNS name (demo)
+  ALBEndpointAsia:
+    Description: ALB DNS Name for Asia
+    Value: my-alb-asia-1234567890.elb.amazonaws.com
+
+  ALBEndpointUS:
+    Description: ALB DNS Name for US
+    Value: my-alb-US-1234567890.elb.amazonaws.com
+
+  EKSClusterAsia:
+    Description: EKS Cluster in Asia
+    Value: https://abc1234567890.gr7.ap-southeast-1.eks.amazonaws.com
+
+  EKSClusterUS:
+    Description: EKS Cluster in US
+    Value: https://xyz123456789.gre.US-west-1.eks.amazonaws.com"
+
+  EKSClusterEndpointAsia:
+    Description: EKS Cluster Endpoint in Asia
+    Value: https://abc1234567890.gr7.ap-southeast-1.eks.amazonaws.com
+
+  EKSClusterEndpointUS:
+    Description: EKS Cluster Endpoint in US
+    Value: https://xyz123456789.gre.US-west-1.eks.amazonaws.com
+
+  RDSEndpointAddress:
+    Description: RDS Endpoint Address
+    Value: my-rds-instance.one12345.us-east-1.rds.amazonaws.com
+
+  RDSEndpointPort:
+    Description: RDS Endpoint Port
+    Value: 3306
+
+#each of the services may require different configuration in terms of specialization and opted to the nature of the application + the required resources the application demands. 
+#EG: rds - Derived below creating an RDS Instance in a VPC's two private subnet. Minimal, barley noticeable and configurable setup to the corresponding architecture
+
+#brief demo of the corresponding infrastructure as per the Infra Architecture of Hexr's Products, by Rithish Sam .M
+#Source: Myself, AWS Docs, ChatGPT
+
+#fin#

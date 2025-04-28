@@ -1,0 +1,283 @@
+// Jenkins pipeline for Node.js application deployment using Docker Compose on Windows with PowerShell
+pipeline {
+    agent {
+        node {
+            label 'remote-server-agent'
+        }
+    }
+
+    triggers {
+        pollSCM('0 0 * * *')  // Daily polling at midnight
+    }
+
+    environment {
+        GIT_CREDENTIALS_ID = 'rithishsamm'
+        COMPOSE_PROJECT_NAME = 'marketplace_Dwnizo_backend'
+        // Using PowerShell-style path joining
+        WORKSPACE_DIR = "${WORKSPACE}"
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                // Clean workspace and checkout code
+                cleanWs()
+                
+                // Checkout with specific credentials and branch
+                git credentialsId: env.GIT_CREDENTIALS_ID,
+                    url: 'http://185.100.212.76:7776/Sabarinathan/marketplace_Dwnizo_backend.git',
+                    branch: 'sub_branch_Nivetha'
+                
+                // Print source information for debugging using PowerShell
+                script {
+                    // Show current directory contents and Git information
+                    powershell '''
+                        Write-Host "Current Directory Contents:" -ForegroundColor Cyan
+                        Get-ChildItem -Force | Format-Table Name, Length, LastWriteTime
+
+                        Write-Host "Git Status:" -ForegroundColor Cyan
+                        $gitCommit = git rev-parse HEAD
+                        Write-Host "Current commit hash: $gitCommit"
+                        
+                        Write-Host "Git Branch Information:" -ForegroundColor Cyan
+                        git branch --show-current
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    // Stop any existing containers using PowerShell
+                    powershell '''
+                        Write-Host "Checking for running containers..." -ForegroundColor Cyan
+                        
+                        # Check if any containers exist for this compose project
+                        $runningContainers = docker compose ps -q
+                        if ($runningContainers) {
+                            Write-Host "Stopping existing containers..." -ForegroundColor Yellow
+                            docker compose down -v
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Failed to stop existing containers"
+                            }
+                        } else {
+                            Write-Host "No existing containers found." -ForegroundColor Green
+                        }
+
+                        Write-Host "Current workspace contents:" -ForegroundColor Cyan
+                        Get-ChildItem -Force | Format-Table Name, Length, LastWriteTime
+                    '''
+                }
+                echo "Build stage completed - Workspace cleaned and prepared for deployment"
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        # Verify docker-compose.yml exists
+                        if (-not (Test-Path "docker-compose.yml")) {
+                            Write-Host "Error: docker-compose.yml not found in current directory!" -ForegroundColor Red
+                            Write-Host "Current directory contents:" -ForegroundColor Yellow
+                            Get-ChildItem -Force
+                            throw "docker-compose.yml not found"
+                        }
+
+                        Write-Host "Starting deployment..." -ForegroundColor Cyan
+                        
+                        try {
+                            # Build and deploy using docker compose
+                            Write-Host "Building and starting containers..." -ForegroundColor Cyan
+                            docker compose up -d --remove-orphans --force-recreate --build
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker compose up failed"
+                            }
+
+                            # Verify deployment
+                            Write-Host "Verifying deployment..." -ForegroundColor Cyan
+                            docker compose ps
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Failed to verify container status"
+                            }
+
+                            # Show container logs
+                            Write-Host "Container logs:" -ForegroundColor Cyan
+                            docker compose logs
+                        }
+                        catch {
+                            Write-Host "Deployment failed: $_" -ForegroundColor Red
+                            throw $_
+                        }
+                    '''
+                }
+                echo "Deployment completed successfully"
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                powershell '''
+                    Write-Host "Pipeline executed successfully!" -ForegroundColor Green
+                    Write-Host "Container Status:" -ForegroundColor Cyan
+                    docker compose ps
+                '''
+            }
+        }
+        failure {
+            script {
+                powershell '''
+                    Write-Host "Pipeline failed! Collecting diagnostic information..." -ForegroundColor Red
+                    
+                    Write-Host "`nDocker Compose Logs:" -ForegroundColor Yellow
+                    docker compose logs
+                    
+                    Write-Host "`nContainer Status:" -ForegroundColor Yellow
+                    docker compose ps
+                    
+                    Write-Host "`nDocker System Information:" -ForegroundColor Yellow
+                    docker system df
+                    
+                    Write-Host "`nWorkspace Contents:" -ForegroundColor Yellow
+                    Get-ChildItem -Force | Format-Table Name, Length, LastWriteTime
+                '''
+            }
+        }
+        always {
+            script {
+                powershell '''
+                    Write-Host "Cleaning up Docker resources..." -ForegroundColor Cyan
+                    docker system prune -f --volumes
+                    
+                    Write-Host "Remaining Docker resources:" -ForegroundColor Cyan
+                    docker system df
+                '''
+            }
+        }
+    }
+}
+
+// // Jenkinsfile
+// ---------------------------------------------------------------------
+
+
+// // Jenkins pipeline for Node.js application deployment using Docker Compose
+// pipeline {
+//     // Specify the agent where the pipeline will run
+//     agent {
+//         // Using a local remote server agent with configured credentials
+//         node {
+//             label 'remote-server-agent'
+//         }
+//     }
+
+//     // Tools required for the pipeline
+//     triggers {
+//         pollSCM('0 0 * * *')
+//     }
+
+//     // Environment variables that will be available throughout the pipeline
+//     environment {
+//         // Define the Git credentials ID as configured in Jenkins
+//         GIT_CREDENTIALS_ID = 'rithishsamm'
+//         // Define the Docker Compose project name
+//         COMPOSE_PROJECT_NAME = 'marketplace_Dwnizo_backend'
+//     }
+
+//     // Pipeline stages define the steps of our deployment process
+//     stages {
+//         // First stage: Source code checkout and acknowledgment
+//         stage('Source') {
+//             steps {
+//                 // Clean the workspace before checking out
+//                 cleanWs()
+                
+//                 // Checkout code using Git credentials
+//                 git credentialsId: env.GIT_CREDENTIALS_ID,
+//                     url: 'http://185.100.212.76:7776/Sabarinathan/marketplace_Dwnizo_backend.git',
+//                     branch: 'sub_branch_Nivetha'
+                
+//                 // Print acknowledgment of successful source code retrieval
+//                 // script {
+//                 //     def gitCommit = powershell(script: 'git rev-parse HEAD', returnStdout: true).trim()
+//                 //     echo "Successfully checked out source code from Git"
+//                 //     echo "Current commit hapowershell: ${gitCommit}"
+//                 // }
+//             }
+//         }
+
+//         // Second stage: Build preparation and workspace cleanup
+//         stage('Build') {
+//             steps {
+//                 // Remove any existing Docker containers and volumes
+//                 // script {
+//                 //     powershell '''
+//                 //         if docker compose ps -q | grep -q . ; then
+//                 //             docker compose down -v
+//                 //         fi
+//                 //     '''
+//                 // }
+                
+//                 // Print build stage acknowledgment
+//                 script {
+//                     powershell '''
+//                     dir .
+//                     '''
+//                     powershell '''
+//                     cd marketplace_Dwnizo_backend
+//                     '''
+//                 }
+//                 echo "Build stage completed - Workspace cleaned and prepared for deployment"
+//             }
+//         }
+
+//         // Third stage: Docker Compose deployment
+//         stage('Deploy') {
+//             steps {
+//                 // Build and start the application using Docker Compose // powershell++ docker compose build --no-cache
+//                 script {
+//                     powershell '''
+//                     ls -la
+//                     '''
+//                     powershell '''
+//                     docker compose up -d . --remove-orphans --force-recreate --build
+//                     '''
+//                 }
+                
+//                 // Print deployment acknowledgment
+//                 echo "Deployment completed successfully"
+                
+//                 // Verify the deployment
+//                 script {
+//                     def containerStatus = powershell(
+//                         script: 'docker compose ps --format json',
+//                         returnStdout: true
+//                     ).trim()
+//                     echo "Container status: ${containerStatus}"
+//                 }
+//             }
+//         }
+//     }
+
+//     // Post-build actions that run regardless of the build result
+//     post {
+//         success {
+//             echo "Pipeline executed successfully! Application is now running."
+//         }
+//         failure {
+//             echo "Pipeline failed. Please check the logs for details."
+//         }
+//         always {
+//             // Clean up any dangling Docker resources
+//             // script {
+//             //     powershell '''
+//             //         docker system prune -f
+//             //     '''
+//             // }
+//             echo "Clean up any dangling Docker resources"
+//         }
+//     }
+// }

@@ -1,0 +1,11 @@
+AWSTemplateFormatVersion: '2024-03-18'
+Description: Hexr AWS Deployment in Asia and US 
+
+Parameters:
+  # parameters for regions, AZs, etc.
+
+Resources:
+  # Resources such as VPC, subnets, IGW, WAF, ELB, ASG, NAT Gateways, EKS, RDS
+
+Outputs:
+  # Output - info about ELB DNS names, EKS cluster endpoint, RDS endpoint, etc.

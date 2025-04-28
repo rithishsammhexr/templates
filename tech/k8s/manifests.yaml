@@ -1,0 +1,8 @@
+apiVersion: app/v1
+kind: Pod
+metadata:
+  labels:
+    - name: dummyPod
+      env: dev
+      releases: v1
+      

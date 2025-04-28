@@ -1,0 +1,30 @@
+#Ingress rules are represented by the AWSEC2SecurityGroupIngress resource:
+
+  InstanceSecurityGroupIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    DependsOn: "InstanceSecurityGroup"
+    Properties:
+      GroupId: !Ref "InstanceSecurityGroup"
+      IpProtocol: "tcp"
+      FromPort: "0"
+      ToPort: "65535"
+      SourceSecurityGroupId: !Ref "InstanceSecurityGroup"
+
+#You now have everything in place to deploy the RDS instance, represented by the AWSRDSDBCluster resource. The example below creates a MySQL instance:
+
+  RDSCluster:
+    Type: "AWS::RDS::DBCluster"
+    Properties:
+      DBSubnetGroupName: !Ref "SubnetGroup"
+      MasterUsername: !Ref "DBUsername"
+      MasterUserPassword: !Ref "DBPassword"
+      DatabaseName: "products"
+      Engine: "MySQL"
+      EngineMode: "RDS"
+      VpcSecurityGroupIds:
+      - !Ref "InstanceSecurityGroup"
+      ScalingConfiguration:
+        AutoPause: true
+        MaxCapacity: 16
+        MinCapacity: 2
+        SecondsUntilAutoPause: 300
