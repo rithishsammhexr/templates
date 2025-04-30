@@ -94,14 +94,14 @@ pipeline {
                     powershell '''
                         Write-Host "Generating sonar-project.properties..."
                         $sonarProps = @"
-sonar.projectKey=Dwinzo_Beta_Project_001
-sonar.projectName=Dwinzo_Beta_Project
-sonar.projectVersion=1.0.0
-sonar.projectDescription=This is a sample project for Dwinzo Beta.
-sonar.sources=./app/
-sonar.language=js
-sonar.javascript.lcov.reportPaths=coverage/lcov.info
-"@
+                        sonar.projectKey=Dwinzo_Beta_Project_001
+                        sonar.projectName=Dwinzo_Beta_Project
+                        sonar.projectVersion=1.0.0
+                        sonar.projectDescription=This is a sample project for Dwinzo Beta.
+                        sonar.sources=./app/
+                        sonar.language=js
+                        sonar.javascript.lcov.reportPaths=coverage/lcov.info
+                        "@
                         Set-Content -Path "sonar-project.properties" -Value $sonarProps
                         Write-Host "Running SonarScanner..."
                         sonar-scanner
@@ -302,14 +302,14 @@ pipeline {
                     powershell '''
                         Write-Host "Generating sonar-project.properties..."
                         $sonarProps = @"
-sonar.projectKey=Dwinzo_Beta_Project_001
-sonar.projectName=Dwinzo_Beta_Project
-sonar.projectVersion=1.0.0
-sonar.projectDescription=This is a sample project for Dwinzo Beta.
-sonar.sources=./app/
-sonar.language=js
-sonar.javascript.lcov.reportPaths=coverage/lcov.info
-"@
+                        sonar.projectKey=Dwinzo_Beta_Project_001
+                        sonar.projectName=Dwinzo_Beta_Project
+                        sonar.projectVersion=1.0.0
+                        sonar.projectDescription=This is a sample project for Dwinzo Beta.
+                        sonar.sources=./app/
+                        sonar.language=js
+                        sonar.javascript.lcov.reportPaths=coverage/lcov.info
+                        "@
                         Set-Content -Path "sonar-project.properties" -Value $sonarProps
                         Write-Host "Running SonarScanner..."
                         sonar-scanner
