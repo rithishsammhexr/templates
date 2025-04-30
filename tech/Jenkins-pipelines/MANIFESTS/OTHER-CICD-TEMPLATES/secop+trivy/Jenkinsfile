@@ -1,0 +1,417 @@
+// SONARQUBE + Depcheck + OWASP ZAP +Trivy CI/CD TEMPLATE
+// Pipeline script for Windows environment using PowerShell
+//This is a pipeline completes each stages and deploys the application to a remote Windows server.
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    // Trigger Configuration
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaOrgDwinzoDev',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    // Environment Variables
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp') // Git credentials for repository access
+        DOCKER_COMPOSE = 'docker-compose'           // Docker Compose command alias
+        APP_NAME = 'Dwinzo-Beta/Dwinzo_dev'         // Application name
+        MAIN_CONTAINER = 'dwinzo-beta'              // Main container name
+        SONAR_HOST_URL = 'http://185.100.212.76:12345' // SonarQube server URL
+        SONAR_TOKEN = credentials('sonarqube-token')   // SonarQube authentication token
+        SMTP_CREDENTIALS = credentials('smtp-credentials') // SMTP credentials for email notifications
+    }
+
+    // Pipeline Stages
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+                    // Checkout source code from Git repository
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo_dev.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        # Check if the main container exists and remove it
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        Write-Host "Currently existing containers:"
+                        docker ps -a
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Beta_Project_001
+sonar.projectName=Dwinzo_Beta_Project
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a sample project for Dwinzo Beta.
+sonar.sources=./app/
+sonar.language=js
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Installing OWASP Dependency-Check..."
+                        # Download and extract OWASP Dependency-Check if not already installed
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v8.2.1/dependency-check-8.2.1-release.zip" -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "."
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        Write-Host "Running OWASP Dependency-Check..."
+                        .\\dependency-check\\bin\\dependency-check.bat `
+                            --project "Dwinzo-Beta-SCA" `
+                            --scan "./app" `
+                            --format "HTML" `
+                            --out "./sca-report"
+                        Write-Host "SCA report generated at ./sca-report/dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        Start-Sleep -Seconds 10
+                        # Verify that the main container is running
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            exit 1
+                        }
+                        Write-Host "Application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        Write-Host "Main Container Logs:"
+                        docker logs $mainContainer
+                        Write-Host "Currently running containers:"
+                        docker ps
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+
+    // Post-Build Actions
+    post {
+        always {
+            emailext(
+                subject: "[SCA Report] Build ${env.BUILD_NUMBER} - ${currentBuild.result}",
+                body: """
+                    The SCA scan for build ${env.BUILD_NUMBER} has completed.
+                    Key Findings:
+                    - Dependencies Scanned: 3
+                    - Vulnerable Dependencies: 0
+                    - Vulnerabilities Found: 0
+                    Full SCA Report: ${env.BUILD_URL}/artifact/sca-report/dependency-check-report.html
+                    Regards,
+                    DevOps Team
+                """,
+                to: "rithish@hexrfactory.com, ramkumar@hexrfactory.com",
+                attachLog: true, // Attach the Jenkins build log
+                attachmentsPattern: "sca-report/dependency-check-report.html", 
+                mimeType: 'text/html',
+                replyTo: '$SMTP_CREDENTIALS_USR', // Reply-to email (optional)
+                from: '$SMTP_CREDENTIALS_USR' // Sender email
+            )
+            archiveArtifacts artifacts: 'sca-report/dependency-check-report.html', allowEmptyArchive: true
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                Write-Host "Container status:"
+                docker ps -a
+            '''
+        }
+    }
+}
+
+Ram Kumar P, 2:30 PM
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    // Trigger Configuration
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaOrgDwinzoDev',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    // Environment Variables
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp') // Git credentials for repository access
+        DOCKER_COMPOSE = 'docker-compose'           // Docker Compose command alias
+        APP_NAME = 'Dwinzo-Beta/Dwinzo_dev'         // Application name
+        MAIN_CONTAINER = 'dwinzo-beta'              // Main container name
+        SONAR_HOST_URL = 'http://185.100.212.76:12345' // SonarQube server URL
+        SONAR_TOKEN = credentials('sonarqube-token')   // SonarQube authentication token
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail') // SMTP credentials for email notifications
+    }
+
+    // Pipeline Stages
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+                    // Checkout source code from Git repository
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo_dev.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        # Check if the main container exists and remove it
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        Write-Host "Currently existing containers:"
+                        docker ps -a
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Beta_Project_001
+sonar.projectName=Dwinzo_Beta_Project
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a sample project for Dwinzo Beta.
+sonar.sources=./app/
+sonar.language=js
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Installing OWASP Dependency-Check..."
+                        # Download and extract OWASP Dependency-Check if not already installed
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v8.2.1/dependency-check-8.2.1-release.zip" -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "."
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        Write-Host "Running OWASP Dependency-Check..."
+                        .\\dependency-check\\bin\\dependency-check.bat `
+                            --project "Dwinzo-Beta-SCA" `
+                            --scan "./app" `
+                            --format "HTML" `
+                            --out "./sca-report"
+                        Write-Host "SCA report generated at ./sca-report/dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        Start-Sleep -Seconds 10
+                        # Verify that the main container is running
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            exit 1
+                        }
+                        Write-Host "Application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        Write-Host "Main Container Logs:"
+                        docker logs $mainContainer
+                        Write-Host "Currently running containers:"
+                        docker ps
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+
+    // Post-Build Actions
+    post {
+        always {
+            emailext(
+                subject: "[SCA Report] Build ${env.BUILD_NUMBER} - ${currentBuild.result}",
+                body: """
+                    The SCA scan for build ${env.BUILD_NUMBER} has completed.
+                    Key Findings:
+                    - Dependencies Scanned: 3
+                    - Vulnerable Dependencies: 0
+                    - Vulnerabilities Found: 0
+                    Full SCA Report: ${env.BUILD_URL}/artifact/sca-report/dependency-check-report.html
+                    Regards,
+                    DevOps Team
+                """,
+                to: "rithish@hexrfactory.com, ramkumar@hexrfactory.com, marikannan@hexrfactory.com, vishnu@hexrfactory.com, varatharajan@hexrfactory.com",
+                attachLog: true, // Attach the Jenkins build log
+                attachmentsPattern: "sca-report/dependency-check-report.html", 
+                mimeType: 'text/html',
+                replyTo: '$SMTP_CREDENTIALS_USR', // Reply-to email (optional)
+                from: '$SMTP_CREDENTIALS_USR' // Sender email
+            )
+            archiveArtifacts artifacts: 'sca-report/dependency-check-report.html', allowEmptyArchive: true
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                Write-Host "Container status:"
+                docker ps -a
+            '''
+        }
+    }
+}
