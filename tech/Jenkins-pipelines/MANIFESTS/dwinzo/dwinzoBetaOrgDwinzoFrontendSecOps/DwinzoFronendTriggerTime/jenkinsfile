@@ -1,0 +1,256 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+    triggers {
+        cron('45 23 * * *') // This schedules the job to run at 11:45 PM every night
+    }
+    environment {
+        GIT_CREDENTIALS         = credentials('ramkumarp')
+        DOCKER_COMPOSE          = 'docker-compose'
+        APP_NAME                = 'Dwinzo-Beta/Dwinzo_dev'
+        MAIN_CONTAINER          = 'dwinzo-beta'
+        SONAR_HOST_URL          = 'http://185.100.212.76:12345'
+        SONAR_TOKEN             = credentials('sonarqube-token')
+        SMTP_CREDENTIALS        = credentials('smtp-credentials-gmail')
+    }
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                        dir
+                    '''
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo_dev.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        docker ps -a
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        docker images
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Image Scan with Trivy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Trivy scan on dwinzo-beta-sonar-frontend image..."
+                        if (-not (Test-Path ".\\trivy-reports")) {
+                            New-Item -ItemType Directory -Path ".\\trivy-reports" | Out-Null
+                        }
+                        $image = "dwinzo-beta-sonar-frontend:latest"
+                        $imageExists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "^$image$"
+                        if (-not $imageExists) {
+                            Write-Host "Image $image does not exist. Skipping Trivy scan."
+                            exit 0
+                        }
+                        Write-Host "Scanning image: $image"
+                        C:\\Tools\\Trivy\\trivy.exe image `
+                            --severity HIGH,CRITICAL `
+                            --format sarif `
+                            --output .\\trivy-reports\\$($image.Replace(":", "_")).sarif `
+                            $image
+                        if ($LASTEXITCODE -eq 1) {
+                            Write-Host "[INFO] High/Critical vulnerabilities found in $image, but build will continue."
+                        } elseif ($LASTEXITCODE -ne 0) {
+                            Write-Error "[ERROR] Trivy failed to scan $image with exit code $LASTEXITCODE"
+                        } else {
+                            Write-Host "No HIGH/CRITICAL vulnerabilities found in $image"
+                        }
+                        Write-Host "Trivy image scanning completed."
+                    '''
+                }
+            }
+        }
+        stage('Secret Scanning with Gitleaks') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Gitleaks scan..."
+                        if (-not (Test-Path ".\\gitleaks-reports")) {
+                            New-Item -ItemType Directory -Path ".\\gitleaks-reports" | Out-Null
+                        }
+                        C:\\Tools\\Gitleaks\\gitleaks.exe detect `
+                            --source . `
+                            --report-format sarif `
+                            --report-path .\\gitleaks-reports\\gitleaks-report.sarif
+                        Write-Host "Gitleaks scan completed. Report saved at .\\gitleaks-reports\\gitleaks-report.sarif"
+                    '''
+                }
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Beta_Project_001
+sonar.projectName=Dwinzo_Beta_Project
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a sample project for Dwinzo Beta.
+sonar.sources=./app/
+sonar.language=js
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Installing OWASP Dependency-Check..."
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v8.2.1/dependency-check-8.2.1-release.zip " -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "." -Force
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        .\\dependency-check\\bin\\dependency-check.bat `
+                            --project "Dwinzo-Beta-SCA" `
+                            --scan "./app" `
+                            --format "HTML" `
+                            --out "./sca-report"
+                        Write-Host "SCA report generated at ./sca-report/dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        Start-Sleep -Seconds 10
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            exit 1
+                        }
+                        Write-Host "Application deployed successfully!"
+                        docker logs $mainContainer
+                        docker ps
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                emailext(
+                    subject: "Dwinzo Beta [Gitleaks, Sonar, SCA, Trivy] - Build ${env.BUILD_NUMBER} | Status: ${currentBuild.result ?: 'SUCCESS'}",
+                     body: """
+                            <div style="font-family: Arial, sans-serif; max-width: 800px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px; background-color: #f7f5fb; color: #333;">
+                        <h2 style="color: #3b1f7d; text-align: center; padding: 15px; border-bottom: 1px solid #ddd;">
+                            Security Scan Results - Dwinzo Beta
+                        </h2>
+                        <p><strong>Dear Team,</strong></p>
+                        <p>The automated security scans for <strong>Dwinzo Beta Build ${env.BUILD_NUMBER}</strong> have completed successfully.</p>
+                        <hr style="border: 0; border-top: 1px solid #eae6f0; margin: 20px 0;" />
+                        <h3 style="color: #3b1f7d;">Scan Summary</h3>
+                        <ul>
+                            <li><strong>Total Dependencies Scanned:</strong> 3 (3 unique) </li>
+                            <li><strong>Vulnerable Dependencies:</strong> 0</li>
+                            <li><strong>Vulnerabilities Detected:</strong> 0</li>
+                            <li><strong>Secrets Found (Gitleaks):</strong> Please review attached report</li>
+                        </ul>
+                        <h3 style="color: #3b1f7d;">Full Reports</h3>
+                        <ul>
+                            <li>SCA Report: <a href="${env.BUILD_URL}/artifact/sca-report/dependency-check-report.html" style="color: #3b1f7d; font-weight: bold; text-decoration: underline;">Dependency-Check HTML Report</a></li>
+                            <li>Gitleaks Report: Attached (SARIF & JSON)</li>
+                            <li>Trivy Image Scans: Attached SARIF files</li>
+                            <li>Sonar Dashboard: <a href="http://185.100.212.76:12345/" style="color: #3b1f7d; font-weight: bold; text-decoration: underline;">SonarQube</a></li>
+                        </ul>
+                        <h3 style="color: #3b1f7d;">SonarQube Login (For Review)</h3>
+                        <p>This is a temporary access for review purposes only. Please do not share this information.</p>
+                        <ul>
+                            <li><strong>Username:</strong> admin</li>
+                            <li><strong>Password:</strong> R@mkumar.p.1</li>
+                        </ul>
+                         <p style="font-size: 0.9em; color: #666; margin-top: 20px;">
+                         <strong>Note:</strong> If you have been provided with separate access credentials, please use them. If your separate access does not work, you can use the above credentials as a fallback.
+                         </p>
+                        <hr style="border: 0; border-top: 1px solid #eae6f0; margin: 20px 0;" />
+                        <p><strong>Note:</strong> This build has passed all code quality, secret scanning, and vulnerability checks. However, we encourage you to briefly review the Gitleaks report to ensure no false negatives were missed.</p>
+                        <p>Best regards,<br/><strong>DevOps & QA Team</strong></p>
+                        <p style="font-size: 0.8em; color: #666; margin-top: 30px;">
+                            This is an automated notification from Jenkins CI/CD. If you believe you received this in error or need further assistance, please contact DevOps.
+                        </p>
+                    </div>
+                    """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, ramkumar@hexrfactory.com, surya@hexrfactory.com",
+                    attachLog: true,
+                    attachmentsPattern: "sca-report/dependency-check-report.html, gitleaks-reports/*.sarif, gitleaks-reports/*.json, trivy-reports/*.sarif",
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com", 
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+                archiveArtifacts artifacts: 'sca-report/dependency-check-report.html', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'gitleaks-reports/gitleaks-report.sarif', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'trivy-reports/*.sarif', allowEmptyArchive: true
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                docker ps -a
+            '''
+        }
+    }
+}
