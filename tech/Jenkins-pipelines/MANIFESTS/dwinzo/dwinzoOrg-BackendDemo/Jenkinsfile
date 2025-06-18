@@ -1,0 +1,505 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaDwinzoBackendDemo',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        COMPOSE_PROJECT_NAME = 'dwinzobackenddemo'
+        MAIN_CONTAINER = 'DwinzoApi_V0_end'
+        SOCKET_CONTAINER = 'DwinzoSocket_V0_end'
+        MONGO_CONTAINER = 'mongo_V0-Dwinzocontainer'
+        NETWORK_NAME = 'DwinzoMajor'
+        SONAR_HOST_URL = 'http://185.100.212.76:12345'
+        SONAR_TOKEN = credentials('sonarqube-token')
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+        WEBSITE_URL = 'http://localhost:4999'
+    }
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo-Backend-V0.0.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing demo containers..."
+                        foreach ($container in @("$env:MAIN_CONTAINER", "$env:SOCKET_CONTAINER", "$env:MONGO_CONTAINER")) {
+                            $cid = docker ps -aq -f "name=$container"
+                            if ($cid) {
+                                Write-Host "Removing container: $container"
+                                docker stop $cid | Out-Null
+                                docker rm $cid | Out-Null
+                            }
+                        }
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose down --remove-orphans 2>$null
+                        Write-Host "Existing containers after cleanup:"
+                        docker ps -a
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose build --no-cache
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Error "Docker Compose build failed"
+                            exit 1
+                        }
+                        Write-Host "Build completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Demo_Backend
+sonar.projectName=Dwinzo_Demo_Backend
+sonar.projectVersion=1.0.0
+sonar.sources=./src
+sonar.language=ts
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        Write-Host "Starting all services..."
+                        docker-compose up -d
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Error "Docker Compose up failed"
+                            docker-compose logs
+                            exit 1
+                        }
+                        Write-Host "Waiting for services to initialize..."
+                        Start-Sleep -Seconds 30
+                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
+                        $socketContainer = docker ps -q -f "name=$env:SOCKET_CONTAINER"
+                        $mongoContainer = docker ps -q -f "name=$env:MONGO_CONTAINER"
+                        $allHealthy = $true
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found or not running"
+                            $allHealthy = $false
+                        }
+                        if (-not $socketContainer) {
+                            Write-Error "Socket server container ($env:SOCKET_CONTAINER) not found or not running"
+                            $allHealthy = $false
+                        }
+                        if (-not $mongoContainer) {
+                            Write-Error "MongoDB container ($env:MONGO_CONTAINER) not found or not running"
+                            $allHealthy = $false
+                        }
+                        if (-not $allHealthy) {
+                            Write-Host "Container logs for debugging:"
+                            docker-compose logs --tail 50
+                            exit 1
+                        }
+                        Write-Host "Application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        Write-Host "Socket Container ID: $socketContainer"
+                        Write-Host "MongoDB Container ID: $mongoContainer"
+                        Write-Host "Testing API endpoints..."
+                        Start-Sleep -Seconds 10
+                        try {
+                            $apiResponse = Invoke-WebRequest -Uri "http://localhost:4999" -TimeoutSec 10 -UseBasicParsing
+                            Write-Host "✅ API Server (port 4999) is responding: $($apiResponse.StatusCode)"
+                        } catch {
+                            Write-Warning "⚠️ API Server (port 4999) not yet responding: $($_.Exception.Message)"
+                        }
+                        try {
+                            $socketResponse = Invoke-WebRequest -Uri "http://localhost:7999" -TimeoutSec 10 -UseBasicParsing
+                            Write-Host "✅ Socket Server (port 7999) is responding: $($socketResponse.StatusCode)"
+                        } catch {
+                            Write-Warning "⚠️ Socket Server (port 7999) not yet responding: $($_.Exception.Message)"
+                        }
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                emailext(
+                    subject: "🚀 Dwinzo Backend - Build ${env.BUILD_NUMBER} | ${currentBuild.result ?: 'SUCCESS'}",
+                    body: """
+                       <!DOCTYPE html>
+                            <html lang="en">
+                            <head>
+                                <meta charset="UTF-8">
+                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                                <title>Deployment Notification</title>
+                                <style>
+                                    body {
+                                        margin: 0;
+                                        padding: 0;
+                                        font-family: Arial, Helvetica, sans-serif;
+                                        background-color: #f5f5f5;
+                                        line-height: 1.6;
+                                    }
+                                    
+                                    .email-wrapper {
+                                        width: 100%;
+                                        background-color: #f5f5f5;
+                                        padding: 20px 0;
+                                    }
+                                    
+                                    .email-container {
+                                        max-width: 600px;
+                                        margin: 0 auto;
+                                        background-color: #ffffff;
+                                        border-radius: 8px;
+                                        overflow: hidden;
+                                        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+                                    }
+                                    
+                                    .header {
+                                        background: linear-gradient(135deg, #722f37 0%, #8b1538 100%);
+                                        color: white;
+                                        text-align: center;
+                                        padding: 30px 20px;
+                                    }
+                                    
+                                    .logo-container {
+                                        background-color: rgba(255, 255, 255, 0.15);
+                                        border-radius: 12px;
+                                        padding: 15px 20px;
+                                        margin-bottom: 20px;
+                                        display: inline-block;
+                                    }
+                                    
+                                    .logo-text {
+                                        font-size: 24px;
+                                        font-weight: bold;
+                                        color: #ffffff;
+                                        margin: 0;
+                                        letter-spacing: 2px;
+                                    }
+                                    
+                                    .logo-subtitle {
+                                        font-size: 12px;
+                                        color: rgba(255, 255, 255, 0.8);
+                                        margin: 5px 0 0 0;
+                                        letter-spacing: 1px;
+                                    }
+                                    
+                                    .header-title {
+                                        font-size: 28px;
+                                        font-weight: bold;
+                                        margin: 0 0 10px 0;
+                                    }
+                                    
+                                    .header-subtitle {
+                                        font-size: 16px;
+                                        margin: 0;
+                                        opacity: 0.9;
+                                    }
+                                    
+                                    .content {
+                                        padding: 30px;
+                                    }
+                                    
+                                    .greeting {
+                                        font-size: 18px;
+                                        color: #722f37;
+                                        margin-bottom: 15px;
+                                        font-weight: 600;
+                                    }
+                                    
+                                    .message {
+                                        color: #333333;
+                                        margin-bottom: 25px;
+                                        font-size: 16px;
+                                    }
+                                    
+                                    .status-box {
+                                        background-color: #faf7f7;
+                                        border: 1px solid #e8d5d8;
+                                        border-radius: 8px;
+                                        padding: 20px;
+                                        margin: 20px 0;
+                                    }
+                                    
+                                    .status-label {
+                                        font-weight: bold;
+                                        color: #722f37;
+                                        margin-bottom: 10px;
+                                    }
+                                    
+                                    .status-badge {
+                                        background-color: #722f37;
+                                        color: white;
+                                        padding: 6px 16px;
+                                        border-radius: 20px;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        display: inline-block;
+                                        margin-bottom: 15px;
+                                    }
+                                    
+                                    .info-row {
+                                        margin: 8px 0;
+                                        color: #555555;
+                                    }
+                                    
+                                    .info-label {
+                                        font-weight: 600;
+                                        color: #722f37;
+                                    }
+                                    
+                                    .quick-access {
+                                        background-color: #faf7f7;
+                                        padding: 25px;
+                                        text-align: center;
+                                        border-top: 1px solid #e8d5d8;
+                                    }
+                                    
+                                    .quick-access-title {
+                                        font-size: 20px;
+                                        font-weight: bold;
+                                        color: #722f37;
+                                        margin-bottom: 20px;
+                                    }
+                                    
+                                    .button-row {
+                                        margin: 15px 0;
+                                    }
+                                    
+                                    .access-button {
+                                        display: inline-block;
+                                        padding: 12px 24px;
+                                        margin: 5px 8px;
+                                        background-color: #8b1538;
+                                        color: white;
+                                        text-decoration: none;
+                                        border-radius: 25px;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                    }
+                                    
+                                    .footer {
+                                        background-color: #faf7f7;
+                                        padding: 25px;
+                                        text-align: center;
+                                        font-size: 13px;
+                                        color: #666666;
+                                        border-top: 1px solid #e8d5d8;
+                                    }
+                                    
+                                    .footer a {
+                                        color: #722f37;
+                                        text-decoration: none;
+                                    }
+                                    
+                                    .company-footer {
+                                        background-color: #f0f0f0;
+                                        padding: 20px;
+                                        text-align: center;
+                                        font-size: 12px;
+                                        color: #888888;
+                                    }
+                                    
+                                    /* Media Queries for Mobile */
+                                    @media only screen and (max-width: 600px) {
+                                        .email-wrapper {
+                                            padding: 10px;
+                                        }
+                                        
+                                        .email-container {
+                                            border-radius: 0;
+                                        }
+                                        
+                                        .header {
+                                            padding: 25px 15px;
+                                        }
+                                        
+                                        .header-title {
+                                            font-size: 24px;
+                                        }
+                                        
+                                        .content {
+                                            padding: 20px 15px;
+                                        }
+                                        
+                                        .quick-access {
+                                            padding: 20px 15px;
+                                        }
+                                        
+                                        .access-button {
+                                            display: block;
+                                            margin: 8px 0;
+                                            padding: 14px 20px;
+                                        }
+                                        
+                                        .logo-text {
+                                            font-size: 20px;
+                                        }
+                                    }
+                                    
+                                    @media only screen and (max-width: 480px) {
+                                        .header-title {
+                                            font-size: 22px;
+                                        }
+                                        
+                                        .greeting {
+                                            font-size: 16px;
+                                        }
+                                        
+                                        .message {
+                                            font-size: 14px;
+                                        }
+                                        
+                                        .quick-access-title {
+                                            font-size: 18px;
+                                        }
+                                    }
+                                </style>
+                            </head>
+                            <body>
+                                <div class="email-wrapper">
+                                    <div class="email-container">
+                                        <!-- Header -->
+                                        <div class="header">
+                                            <div class="logo-container">
+                                                <div style="display: flex; align-items: center; justify-content: center; gap: 12px;">
+                                                    <div style="width: 45px; height: 45px; background: linear-gradient(135deg, #722f37 0%, #8b1538 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 3px 12px rgba(114, 47, 55, 0.3);">
+                                                        <span style="font-family: Arial, sans-serif; font-weight: bold; color: #ffffff; font-size: 18px;">DZ</span>
+                                                    </div>
+                                                    <div style="text-align: left;">
+                                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                                            <div class="logo-text">DWINZO</div>
+                                                            <span style="background-color: rgba(255,255,255,0.25); color: #ffffff; font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 12px; letter-spacing: 0.5px;">BETA</span>
+                                                        </div>
+                                                        <div class="logo-subtitle">BACKEND API</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="header-title">🚀 Deployment Notification</div>
+                                            <div class="header-subtitle">Build #${env.BUILD_NUMBER} • ${new Date().format('MMM dd, yyyy HH:mm')}</div>
+                                        </div>
+                            
+                                        <!-- Main Content -->
+                                        <div class="content">
+                                            <div class="greeting">Hello Team,</div>
+                                            <div class="message">
+                                                A new deployment has been completed successfully for the Dwinzo Backend API. All services are now running and ready for testing.
+                                            </div>
+                            
+                                            <!-- Status Information -->
+                                            <div class="status-box">
+                                                <div class="status-label">Deployment Status</div>
+                                                <div class="status-badge">${currentBuild.result ?: 'SUCCESS'}</div>
+                                                
+                                                <div class="info-row">
+                                                    <span class="info-label">Build Number:</span> #${env.BUILD_NUMBER}
+                                                </div>
+                                                <div class="info-row">
+                                                    <span class="info-label">Triggered by:</span> ${env.author ?: 'System'}
+                                                </div>
+                                                <div class="info-row">
+                                                    <span class="info-label">Branch:</span> main
+                                                </div>
+                                                <div class="info-row">
+                                                    <span class="info-label">Commit:</span> ${env.commit ? env.commit.substring(0, 8) : 'N/A'}
+                                                </div>
+                                            </div>
+                                        </div>
+                            
+                                        <!-- Quick Access Section -->
+                                        <div class="quick-access">
+                                            <div class="quick-access-title">⚡ Quick Access</div>
+                                            <div class="button-row">
+                                                <a href="http://185.100.212.76:4999/" class="access-button">🌐 API Server</a>
+                                                <a href="http://185.100.212.76:7999/" class="access-button">🔌 Socket Server</a>
+                                                <a href="http://185.100.212.76:27022" class="access-button">🗄️ MongoDB</a>
+                                            </div>
+                                            <div class="button-row">
+                                                <a href="${env.SONAR_HOST_URL}/dashboard?id=Dwinzo_Demo_Backend" class="access-button">🕵️ SonarQube</a>
+                                                <a href="http://185.100.212.76:1234/blue/organizations/jenkins/DwinzoBeta_Backend-Demo/detail/DwinzoBeta_Backend-Demo/${env.BUILD_NUMBER}/pipeline" class="access-button">📊 View Build</a>
+                                                <a href="#" class="access-button">📈 Grafana</a>
+                                            </div>
+                                        </div>
+                            
+                                        <!-- Footer -->
+                                        <div class="footer">
+                                            <div><strong>Contact:</strong> <a href="mailto:marikannan@hexrfactory.com">marikannan@hexrfactory.com</a></div>
+                                            <div style="margin: 10px 0;"><strong>Infrastructure Engineering</strong> by Rithish Samm & Ramkumar P.</div>
+                                            <div style="margin: 10px 0; font-size: 12px; opacity: 0.8;">
+                                                For technical support or deployment issues, contact the DevOps/QA team immediately.
+                                            </div>
+                                            <div style="margin: 10px 0; font-size: 12px; opacity: 0.8;">
+                                                This Product is Managed By <strong>Marikannan Sankarraj.</strong>
+                                            </div>
+                                        </div>
+                            
+                                        <!-- Company Footer -->
+                                        <div class="company-footer">
+                                            <div><strong>HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</strong></div>
+                                            <div>© ${new Date().getYear() + 1900}, All rights reserved.</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </body>
+                            </html>
+                        """,
+                    to: "ramkumar@hexrfactory.com, surya@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+    }
+}
