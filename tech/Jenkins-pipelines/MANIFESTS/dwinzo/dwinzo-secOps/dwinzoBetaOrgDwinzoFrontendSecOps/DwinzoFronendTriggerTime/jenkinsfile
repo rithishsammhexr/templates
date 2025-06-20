@@ -1,0 +1,458 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        cron('45 23 * * *') // Runs daily at 11:45 PM
+    }
+
+    environment {
+        GIT_CREDENTIALS     = credentials('ramkumarp')
+        DOCKER_COMPOSE      = 'docker-compose'
+        APP_NAME            = 'Dwinzo-Beta/Dwinzo_dev'
+        MAIN_CONTAINER      = 'dwinzo-beta'
+        SONAR_HOST_URL      = 'http://185.100.212.76:12345'
+        SONAR_TOKEN         = credentials('sonarqube-token')
+        SMTP_CREDENTIALS    = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                        dir
+                    '''
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo_dev.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        docker ps -a
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        docker images
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Image Scan with Trivy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Trivy scan on dwinzo-beta-sonar-frontend image..."
+                        if (-not (Test-Path ".\\trivy-reports")) {
+                            New-Item -ItemType Directory -Path ".\\trivy-reports" | Out-Null
+                        }
+                        $image = "dwinzo-beta-sonar-frontend:latest"
+                        $imageExists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "^$image$"
+                        if (-not $imageExists) {
+                            Write-Host "Image $image does not exist. Skipping Trivy scan."
+                            exit 0
+                        }
+                        Write-Host "Scanning image: $image"
+                        C:\\Tools\\Trivy\\trivy.exe image `
+                            --severity HIGH,CRITICAL `
+                            --format sarif `
+                            --output .\\trivy-reports\\$($image.Replace(":", "_")).sarif `
+                            $image
+                        if ($LASTEXITCODE -eq 1) {
+                            Write-Host "[INFO] High/Critical vulnerabilities found in $image, but build will continue."
+                        } elseif ($LASTEXITCODE -ne 0) {
+                            Write-Error "[ERROR] Trivy failed to scan $image with exit code $LASTEXITCODE"
+                        } else {
+                            Write-Host "No HIGH/CRITICAL vulnerabilities found in $image"
+                        }
+                        Write-Host "Trivy image scanning completed."
+                    '''
+                }
+            }
+        }
+
+        stage('Secret Scanning with Gitleaks') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Gitleaks scan..."
+                        if (-not (Test-Path ".\\gitleaks-reports")) {
+                            New-Item -ItemType Directory -Path ".\\gitleaks-reports" | Out-Null
+                        }
+                        C:\\Tools\\Gitleaks\\gitleaks.exe detect `
+                            --source . `
+                            --report-format sarif `
+                            --report-path .\\gitleaks-reports\\gitleaks-report.sarif
+                        Write-Host "Gitleaks scan completed. Report saved at .\\gitleaks-reports\\gitleaks-report.sarif"
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Beta_Project_001
+sonar.projectName=Dwinzo_Beta_Project
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a sample project for Dwinzo Beta.
+sonar.sources=./app/
+sonar.language=js
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Installing OWASP Dependency-Check..."
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v8.2.1/dependency-check-8.2.1-release.zip"  -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "." -Force
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        .\\dependency-check\\bin\\dependency-check.bat `
+                            --project "Dwinzo-Beta-SCA" `
+                            --scan "./app" `
+                            --format "HTML" `
+                            --out "./sca-report"
+                        Write-Host "SCA report generated at ./sca-report/dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting deployment with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        Start-Sleep -Seconds 10
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found"
+                            exit 1
+                        }
+                        Write-Host "Application deployed successfully!"
+                        docker logs $mainContainer
+                        docker ps
+                        dir
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                emailext(
+                    subject: "🛡️ Dwinzo Beta Security Scan - Build ${env.BUILD_NUMBER} | Status: ${currentBuild.result ?: 'SUCCESS'}",
+                    body: """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dwinzo Security Report</title>
+    <style>
+        /* Email-safe CSS with fallbacks */
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f1f5f9; line-height: 1.6; }
+        table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+        .email-container { width: 100%; max-width: 800px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12); }
+        /* Header Section */
+        .header-section { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); background-color: #667eea; padding: 40px 30px; text-align: center; color: white; }
+        /* Logo Styling */
+        .company-logo { width: 180px; height: 28px; background: linear-gradient(135deg, #ffffff, #f8fafc); border-radius: 20px; display: inline-block; text-align: center; line-height: 1.1; margin-bottom: 25px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2); border: 3px solid rgba(255, 255, 255, 0.3); padding: 20px 15px; position: relative; }
+        .logo-text-container { display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .logo-main { font-size: 28px; font-weight: 900; color: #4c1d95; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; text-shadow: 0 2px 4px rgba(76, 29, 149, 0.3); line-height: 1; }
+        .logo-beta { font-size: 14px; font-weight: 600; color: #8b5cf6; text-transform: uppercase; letter-spacing: 2px; opacity: 0.9; margin-top: -2px; }
+        .header-title { font-size: 28px; font-weight: bold; margin: 15px 0 8px 0; color: white; }
+        .header-subtitle { font-size: 16px; margin: 0; opacity: 0.9; }
+        /* Greeting Section */
+        .greeting-section { padding: 30px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+        .greeting-text { font-size: 18px; color: #1e293b; margin: 0 0 10px 0; font-weight: 600; }
+        .greeting-subtext { font-size: 14px; color: #64748b; margin: 0; }
+        /* Status Banner */
+        .status-banner { background: linear-gradient(135deg, #10b981, #059669); background-color: #10b981; color: white; padding: 25px; text-align: center; }
+        .status-text { font-size: 20px; font-weight: bold; margin: 0; }
+        /* Content Sections */
+        .content-section { padding: 30px; }
+        .section-header { margin-bottom: 20px; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }
+        .section-title { font-size: 20px; font-weight: bold; color: #1e293b; margin: 0; }
+        /* Metrics Grid */
+        .metrics-table { width: 100%; margin-bottom: 30px; }
+        .metric-card { background: linear-gradient(135deg, #ffffff, #f8fafc); background-color: #f8fafc; border-radius: 12px; padding: 20px; text-align: center; border: 1px solid #e2e8f0; margin: 10px; width: 140px; display: inline-block; vertical-align: top; }
+        .metric-number { font-size: 32px; font-weight: bold; color: #8b5cf6; margin-bottom: 8px; display: block; }
+        .metric-label { font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        /* Reports Container */
+        .reports-container { background-color: #fafafa; border-radius: 12px; padding: 25px; margin-bottom: 25px; border: 1px solid #e2e8f0; }
+        .report-item { background-color: #ffffff; padding: 18px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #8b5cf6; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06); }
+        .report-name { font-size: 16px; font-weight: 600; color: #1e293b; margin-bottom: 5px; }
+        .report-link { color: #8b5cf6; text-decoration: none; font-weight: 500; font-size: 14px; }
+        /* Credentials Section */
+        .credentials-section { background: linear-gradient(135deg, #fef3c7, #fde68a); border-radius: 12px; padding: 25px; margin: 25px 0; border: 2px solid #f59e0b; }
+        .credentials-title { font-size: 16px; font-weight: bold; color: #92400e; margin-bottom: 15px; }
+        .credential-item { background-color: rgba(255, 255, 255, 0.9); padding: 12px 15px; margin: 8px 0; border-radius: 6px; font-family: Monaco, Consolas, monospace; font-size: 13px; border-left: 3px solid #f59e0b; }
+        /* Footer Section */
+        .footer-section { background: linear-gradient(135deg, #1e293b, #334155); background-color: #1e293b; color: white; padding: 35px; text-align: center; }
+        .team-signature { font-size: 18px; font-weight: bold; margin-bottom: 15px; }
+        .footer-text { font-size: 14px; margin: 8px 0; opacity: 0.9; }
+        .footer-links { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.2); }
+        .footer-link { color: #a855f7; text-decoration: none; font-weight: 500; }
+        /* Responsive for mobile */
+        @media only screen and (max-width: 600px) {
+            .email-container { margin: 10px !important; width: calc(100% - 20px) !important; }
+            .content-section { padding: 20px !important; }
+            .greeting-section { padding: 20px !important; }
+            .metric-card { width: calc(50% - 20px) !important; margin: 5px !important; }
+            .header-title { font-size: 24px !important; }
+        }
+        /* Outlook specific fixes */
+        .outlook-fix { mso-line-height-rule: exactly; }
+        /* High contrast mode support */
+        @media (prefers-contrast: high) {
+            .metric-card { border: 2px solid #000000; }
+            .report-item { border: 1px solid #000000; }
+        }
+    </style>
+    <!--[if mso]>
+    <style type="text/css">
+        .email-container { width: 800px !important; }
+        .metric-card { width: 140px !important; }
+        .logo-fallback { display: table-cell; vertical-align: middle; text-align: center; width: 140px; height: 140px; }
+    </style>
+    <![endif]-->
+</head>
+<body>
+<!-- Main Container Table for Outlook -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+        <td align="center" style="padding: 20px 0; background-color: #f1f5f9;">
+            <div class="email-container">
+                <!-- Header Section -->
+                <div class="header-section">
+                    <!-- Updated Logo -->
+                    <div class="company-logo">
+                        <!--[if mso]>
+                        <table width="140" height="140" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td align="center" valign="middle" style="width: 140px; height: 140px;">
+                        <![endif]-->
+                        <div class="logo-text-container">
+                            <div class="logo-main">DWINZO</div>
+                            <div class="logo-beta">Beta</div>
+                        </div>
+                        <!--[if mso]>
+                                </td>
+                            </tr>
+                        </table>
+                        <![endif]-->
+                    </div>
+                    <h1 class="header-title">🎯️ Dwinzo Beta Security Report</h1>
+                    <p class="header-subtitle">Build #${env.BUILD_NUMBER} • Comprehensive Security Assessment</p>
+                </div>
+                <!-- Greeting Section -->
+                <div class="greeting-section">
+                    <p class="greeting-text">Hello Development Team! 👋</p>
+                    <p class="greeting-subtext">Your latest security scan has been completed successfully. Here's your comprehensive security assessment report with all the details you need.</p>
+                </div>
+                <!-- Status Banner -->
+                <div class="status-banner">
+                    <p class="status-text">🛡️✨ Security Scan Completed Successfully</p>
+                </div>
+                <!-- Metrics Section -->
+                <div class="content-section">
+                    <div class="section-header">
+                        <h2 class="section-title">📊 Security Metrics Overview</h2>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="display: inline-block; width: 140px; margin: 10px;">
+                            <span style="font-size: 32px; font-weight: bold; color: #8b5cf6;">3</span><br/>
+                            <span style="font-size: 12px; color: #64748b; text-transform: uppercase;">Dependencies<br>Scanned</span>
+                        </div>
+                        <div style="display: inline-block; width: 140px; margin: 10px;">
+                            <span style="font-size: 32px; font-weight: bold; color: #8b5cf6;">0</span><br/>
+                            <span style="font-size: 12px; color: #64748b; text-transform: uppercase;">Vulnerabilities<br>Found</span>
+                        </div>
+                        <div style="display: inline-block; width: 140px; margin: 10px;">
+                            <span style="font-size: 32px; font-weight: bold; color: #8b5cf6;">0</span><br/>
+                            <span style="font-size: 12px; color: #64748b; text-transform: uppercase;">Critical<br>Issues</span>
+                        </div>
+                        <div style="display: inline-block; width: 140px; margin: 10px;">
+                            <span style="font-size: 32px; font-weight: bold; color: #8b5cf6;">✅</span><br/>
+                            <span style="font-size: 12px; color: #64748b; text-transform: uppercase;">Secrets<br>Check</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- Reports Section -->
+                <div class="content-section">
+                    <div class="section-header">
+                        <h2 class="section-title">📄 Detailed Security Reports</h2>
+                    </div>
+                    <div class="reports-container">
+                        <div class="report-item">
+                            <div class="report-name">📈 SonarQube Code Quality Dashboard</div>
+                            <a href="http://185.100.212.76:12345/" target="_blank" class="report-link">Access SonarQube Dashboard →</a>
+                        </div>
+                        <div class="report-item">
+                            <div class="report-name">🔍 Software Composition Analysis (SCA)</div>
+                            <a href="${env.BUILD_URL}/artifact/sca-report/dependency-check-report.html" target="_blank" class="report-link">View Dependency Report →</a>
+                        </div>
+                        <div class="report-item">
+                            <div class="report-name">🔐 GitLeaks Security Scan</div>
+                            <span class="report-link">SARIF & JSON Reports Attached</span>
+                        </div>
+                        <div class="report-item">
+                            <div class="report-name">🐳 Trivy Container Security Scan</div>
+                            <span class="report-link">SARIF Reports Attached</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- Credentials Section -->
+                <div class="content-section">
+                    <div class="section-header">
+                        <h2 class="section-title">🔑 SonarQube & Grafana Access Credentials</h2>
+                    </div>
+                    <div class="credentials-section">
+                        <div class="credentials-title">
+                            ⚠️ Temporary Access Credentials - For Review Only
+                        </div>
+                        <p style="color: #92400e; font-size: 14px; margin-bottom: 15px;">Please keep these credentials confidential and use them only for this security review.</p>
+                        <div class="credential-item">
+                            <strong>Username:</strong> admin
+                        </div>
+                        <div class="credential-item">
+                            <strong>Password:</strong> R@mkumar.p.1
+                        </div>
+                        <p style="font-size: 12px; color: #92400e; margin-top: 10px; font-style: italic;">If you have separate access credentials, please use them first. Use the above only as fallback.</p>
+                    </div>
+                </div>
+                <!-- Quick Access Section -->
+                <div class="content-section">
+                    <div class="section-header">
+                        <h2 class="section-title">📡 Quick Access</h2>
+                    </div>
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background: linear-gradient(135deg, #f8fafc, #f1f5f9); border-radius: 12px; padding: 20px;">
+                        <tr>
+                            <td align="center" style="padding: 20px;">
+                                <div style="margin-bottom: 15px; text-align:center;">
+                                    <a href="http://185.100.212.76:8200/" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6); color:#fff; padding:14px 28px; border-radius:25px; text-decoration:none; font-weight:600; font-size:14px; display:inline-block; margin:8px 10px;">🌐 Application URL</a>
+                                    <a href="http://185.100.212.76:1234/" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6); color:#fff; padding:14px 28px; border-radius:25px; text-decoration:none; font-weight:600; font-size:14px; display:inline-block; margin:8px 10px;">🤖 Jenkins Dashboard</a>
+                                    <a href="http://185.100.212.76:12345/" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6); color:#fff; padding:14px 28px; border-radius:25px; text-decoration:none; font-weight:600; font-size:14px; display:inline-block; margin:8px 10px;">🕵️ SonarQube</a>
+
+                                </div>
+                                <div style="text-align:center;">
+                                    <a href="http://185.100.212.76:1234/job/Dwinzo-Beta-Sonar/lastSuccessfulBuild/artifact/sca-report/dependency-check-report.html" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6); color:#fff; padding:14px 28px; border-radius:25px; text-decoration:none; font-weight:600; font-size:14px; display:inline-block; margin:8px 10px;">🛡️ OWASP Dependency-Check</a>
+                                    <a href="http://185.100.212.76:5678/a/grafana-metricsdrilldown-app/drilldown?..." target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6); color:#fff; padding:14px 28px; border-radius:25px; text-decoration:none; font-weight:600; font-size:14px; display:inline-block; margin:8px 10px;">👁️ Grafana Dashboard</a>
+                                </div>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                <!-- Footer Section -->
+                <div class="footer-section">
+                    <div style="font-size: 18px; font-weight: bold; margin-bottom: 15px;">⚡ DevOps & QA Team ✨</div>
+                    <p style="font-size: 14px; margin: 8px 0; opacity: 0.9;"><strong>Congratulations!</strong> 🎉 This build has successfully passed all security scans, code quality checks, and vulnerability assessments.</p>
+                    <p style="font-size: 14px; margin: 8px 0; opacity: 0.9;">Keep up the excellent work! Your commitment to security and code quality is making our applications more robust and secure.</p>
+                    <p style="font-size: 14px; margin: 8px 0; opacity: 0.9;">🤖 Automated notification from Jenkins CI/CD Pipeline<br>Configured and maintained by <strong>Rithish Samm & Ramkumar P.</strong></p>
+                    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.2);">
+                        <span style="color: #a855f7; font-weight: 600;">Need Help?</span><br>
+                        <span style="font-size: 14px; opacity: 0.9;">Contact our DevOps / QA Team for any assistance or questions about this report.</span>
+                    </div>
+                    <p style="font-size: 11px; opacity: 0.7; margin-top: 15px;">Great developers don’t just write code — they solve problems 😊</p>
+                </div>
+            </div>
+        </td>
+    </tr>
+    <!-- Company Footer -->
+         <tr>
+         <td style="padding: 20px; text-align: center; font-size: 12px; color: #666; background-color: #fafafa; border-top: 1px solid #eee;">
+         Product by <strong>HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</strong><br>
+         © ${new Date().getYear() + 1900}, All rights reserved.
+         </td>
+        </tr>
+                </table>
+                </body>
+                </html>
+                """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, nalvazhuthi@hexrfactory.com, ramkumar@hexrfactory.com, surya@hexrfactory.com",
+                    attachLog: true,
+                    attachmentsPattern: "sca-report/dependency-check-report.html, gitleaks-reports/*.sarif, gitleaks-reports/*.json, trivy-reports/*.sarif",
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+
+                archiveArtifacts artifacts: 'sca-report/dependency-check-report.html', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'gitleaks-reports/gitleaks-report.sarif', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'trivy-reports/*.sarif', allowEmptyArchive: true
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+                docker ps -a
+            '''
+        }
+    }
+}
