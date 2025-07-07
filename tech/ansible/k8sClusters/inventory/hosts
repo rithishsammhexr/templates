@@ -1,0 +1,9 @@
+# This is the inventory file for the Kubernetes cluster setup.
+# It defines the nodes in the cluster and their connection details. 
+# !IMPORTANT MAIN NOTE: Each **host definition must be on a single line**. No line breaks for variables. &
+# This file should be kept up to date with the current cluster configuration.
+[ubuntu]
+controlplane123 ansible_host=192.168.0.123 ansible_user=admin123 ansible_connection=ssh ansible_ssh_private_key_file=~/.ssh/ansible
+workernode124 ansible_host=192.168.0.124 ansible_user=admin124 ansible_connection=ssh ansible_ssh_private_key_file=~/.ssh/ansible
+workernode125 ansible_host=192.168.0.125 ansible_user=admin125 ansible_connection=ssh ansible_ssh_private_key_file=~/.ssh/ansible
+nfs ansible_host=192.168.0.126 ansible_user=rithishsamm ansible_connection=ssh ansible_ssh_private_key_file=~/.ssh/ansible
