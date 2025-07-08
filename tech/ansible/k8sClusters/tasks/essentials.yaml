@@ -1,0 +1,24 @@
+- name: Update and upgrade apt packages
+  apt:
+    name: "*"
+    state: latest
+
+- name: Install essential packages
+  apt:
+    name:
+      - curl
+      - wget
+      - vim
+      - build-essential
+      - software-properties-common
+      - tmux
+      - git
+      - net-tools
+      - htop
+    state: latest
+
+- name: Clean up apt cache
+  apt: 
+    name: "*"
+    state: absent
+    autoremove: yes
