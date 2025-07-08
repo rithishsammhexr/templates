@@ -1,0 +1,31 @@
+#allHostsallGroups:
+username: rithishsamm
+packages:
+  - curl
+  - wget
+  - vim
+  - build-essential
+  - software-properties-common
+  - tmux
+  - git
+  - net-tools
+  - htop
+
+# ssh_key: ~/.ssh/ansible
+# ansible_python_interpreter: /usr/bin/python3
+
+# ansible_become: true
+# ansible_become_method: sudo
+# ansible_become_user: root
+# ansible_connection: ssh
+# ansible_ssh_private_key_file: ~/.ssh/ansible
+# ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+# ansible_host_key_checking: false
+# ansible_ssh_extra_args: '-o ControlMaster=auto -o ControlPersist=60s -o ControlPath=~/.ssh/ansible-%%h-%%p-%%r'
+# ansible_ssh_args: '-o ForwardAgent=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3'
+# ansible_user: "{{ username }}"
+# ansible_ssh_private_key_file: "{{ ssh_key }}"
+# ansible_python_interpreter: "{{ ansible_python_interpreter }}"
+# ansible_become: "{{ ansible_become }}"
+# ansible_become_method: "{{ ansible_become_method }}"
+# ansible_become_user: "{{ ansible_become_user }}"
